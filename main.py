@@ -58,10 +58,13 @@ def create_strategy(name: str) -> BaseStrategy:
         return SmaCrossStrategy(short_period=20, long_period=50)
     elif name == "momentum":
         from strategy.momentum import MomentumStrategy
-        return MomentumStrategy(
-            rsi_period=14, rsi_overbought=70, rsi_oversold=30,
-            ema_short=20, ema_long=50,
-        )
+        return MomentumStrategy()
+    elif name == "trend_follow":
+        from strategy.trend_follow import TrendFollowStrategy
+        return TrendFollowStrategy()
+    elif name == "scalping":
+        from strategy.scalping import ScalpingStrategy
+        return ScalpingStrategy()
     elif name == "breakout":
         from strategy.breakout import BreakoutStrategy
         return BreakoutStrategy(
@@ -443,11 +446,18 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     client = OandaClient(settings)
     loader = OandaDataLoader(client)
 
+    from datetime import datetime, timezone
+    
+    req_to_date = f"{args.to_date}T23:59:59Z"
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if req_to_date > now_utc:
+        req_to_date = now_utc
+
     df = loader.fetch_and_cache(
         instrument=args.instrument,
-        granularity="H1",
+        granularity=args.granularity,
         from_date=f"{args.from_date}T00:00:00Z",
-        to_date=f"{args.to_date}T23:59:59Z",
+        to_date=req_to_date,
         cache_dir=str(PROJECT_ROOT / "data" / "cache"),
     )
 
@@ -581,11 +591,18 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     client = OandaClient(settings)
     loader = OandaDataLoader(client)
 
+    from datetime import datetime, timezone
+
+    req_to_date = f"{args.to_date}T23:59:59Z"
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if req_to_date > now_utc:
+        req_to_date = now_utc
+
     df = loader.fetch_and_cache(
         instrument=args.instrument,
-        granularity="H1",
+        granularity=args.granularity,
         from_date=f"{args.from_date}T00:00:00Z",
-        to_date=f"{args.to_date}T23:59:59Z",
+        to_date=req_to_date,
         cache_dir=str(PROJECT_ROOT / "data" / "cache"),
     )
 
@@ -641,9 +658,13 @@ def build_parser() -> argparse.ArgumentParser:
     # run
     p_run = subparsers.add_parser("run", help="ボットを起動する")
     p_run.add_argument(
-        "--strategy", "-s", default="momentum",
-        choices=["sma_cross", "momentum", "breakout"],
-        help="使用する戦略（デフォルト: momentum）",
+        "--strategy", "-s", default="scalping",
+        choices=["sma_cross", "momentum", "breakout", "trend_follow", "scalping"],
+        help="使用する戦略（デフォルト: scalping）",
+    )
+    p_run.add_argument(
+        "--granularity", "-g", default="M5",
+        help="時間足（デフォルト: M5）",
     )
     p_run.add_argument(
         "--instrument", "-i", default="USD_JPY",
@@ -660,9 +681,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # backtest
     p_bt = subparsers.add_parser("backtest", help="バックテストを実行する")
-    p_bt.add_argument("--strategy", "-s", default="momentum",
-                       choices=["sma_cross", "momentum", "breakout"])
+    p_bt.add_argument("--strategy", "-s", default="scalping",
+                       choices=["sma_cross", "momentum", "breakout", "trend_follow", "scalping"])
     p_bt.add_argument("--instrument", "-i", default="USD_JPY")
+    p_bt.add_argument("--granularity", "-g", default="M5")
     p_bt.add_argument("--from", dest="from_date", default="2024-01-01",
                        help="開始日 (YYYY-MM-DD)")
     p_bt.add_argument("--to", dest="to_date", default="2024-06-01",
@@ -670,9 +692,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # optimize
     p_opt = subparsers.add_parser("optimize", help="パラメータ最適化を実行する")
-    p_opt.add_argument("--strategy", "-s", default="momentum",
-                       choices=["sma_cross", "momentum", "breakout"])
+    p_opt.add_argument("--strategy", "-s", default="scalping",
+                       choices=["sma_cross", "momentum", "breakout", "trend_follow", "scalping"])
     p_opt.add_argument("--instrument", "-i", default="USD_JPY")
+    p_opt.add_argument("--granularity", "-g", default="M5")
     p_opt.add_argument("--from", dest="from_date", default="2024-01-01",
                        help="開始日 (YYYY-MM-DD)")
     p_opt.add_argument("--to", dest="to_date", default="2024-06-01",

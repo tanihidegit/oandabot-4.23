@@ -112,3 +112,18 @@ class BaseStrategy(ABC):
     def __repr__(self) -> str:
         """戦略の文字列表現を返す。"""
         return f"{self.name}(params={self.params})"
+
+    def get_dynamic_exits(self, df: pd.DataFrame, index: int) -> tuple[float | None, float | None]:
+        """
+        現在の動的TPとSL（pips幅）を取得する。
+
+        サブクラスでオーバーライドして、ATRなどに基づいたTP/SLを返す。
+        
+        Args:
+            df: テクニカル指標を含むデータ。
+            index: 現在の行インデックス。
+
+        Returns:
+            (tp_pips, sl_pips) のタプル。設定しない場合はNoneを返す。
+        """
+        return None, None

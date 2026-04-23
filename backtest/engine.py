@@ -29,6 +29,8 @@ class Trade:
     units: int = 1000
     pips_result: float = 0.0
     profit_loss: float = 0.0      # 金額（円）
+    tp_price: float | None = None # 利確価格
+    sl_price: float | None = None # 損切価格
     exit_reason: str = ""         # "signal", "take_profit", "stop_loss"
 
 
@@ -40,8 +42,9 @@ class BacktestConfig:
     spread_pips: float = 0.3                # スプレッド（pips）
     take_profit_pips: float | None = None   # 利確幅（pips）。Noneで無効。
     stop_loss_pips: float | None = None     # 損切幅（pips）。Noneで無効。
-    max_positions: int = 1                  # 最大同時保有ポジション数
+    max_positions: int = 2                  # 最大同時保有ポジション数
     pip_value: float = 0.01                 # 1pipの値（USD_JPYなら0.01）
+    risk_pct: float = 0.02                  # 1トレードあたりのリスク上限（口座残高の2%）
 
 
 class Backtester:
@@ -79,7 +82,7 @@ class Backtester:
 
         logger.info(
             "バックテストエンジンを初期化: 戦略=%s, 初期資金=%.0f, "
-            "TP=%.1s pips, SL=%s pips, スプレッド=%.1f pips",
+            "TP=%.1f pips, SL=%.1f pips, スプレッド=%.1f pips",
             self.strategy.name, self.config.initial_balance,
             self.config.take_profit_pips, self.config.stop_loss_pips,
             self.config.spread_pips,
@@ -120,12 +123,13 @@ class Backtester:
                 current_time, high, low, current_price, balance,
             )
 
-            # 2. シグナル生成
+            # 2. 動的TP/SLの取得とシグナル生成
+            tp_pips, sl_pips = self.strategy.get_dynamic_exits(df, i)
             signal = self.strategy.generate_signal(df, i)
 
             # 3. シグナルに基づく売買処理
             balance = self._process_signal(
-                signal, current_time, current_price, balance,
+                signal, current_time, current_price, balance, tp_pips, sl_pips
             )
 
             # 4. 資産推移を記録（含み損益込み）
@@ -157,9 +161,24 @@ class Backtester:
         current_time: datetime,
         current_price: float,
         balance: float,
+        tp_pips: float | None = None,
+        sl_pips: float | None = None,
     ) -> float:
         """シグナルに基づいてエントリー・決済処理を行う。"""
         spread_cost = self.config.spread_pips * self.config.pip_value
+        
+        # SL/TPの決定（動的 > Config）
+        final_sl_pips = sl_pips if sl_pips is not None else self.config.stop_loss_pips
+        final_tp_pips = tp_pips if tp_pips is not None else self.config.take_profit_pips
+
+        # ポジションサイジング
+        units = self.config.units
+        if final_sl_pips is not None and final_sl_pips > 0:
+            max_loss_amount = balance * self.config.risk_pct
+            loss_per_unit = final_sl_pips * self.config.pip_value
+            calculated_units = int(max_loss_amount / loss_per_unit)
+            # 1000通貨単位で丸める等の調整も可能だが、今回はそのまま
+            units = max(1000, calculated_units)
 
         if signal == Signal.BUY:
             # ショートポジションがあれば決済
@@ -169,11 +188,16 @@ class Backtester:
             # ロングエントリー（最大ポジション数チェック）
             if len(self.open_positions) < self.config.max_positions:
                 entry_price = current_price + spread_cost / 2  # スプレッド考慮
+                tp_price = entry_price + final_tp_pips * self.config.pip_value if final_tp_pips else None
+                sl_price = entry_price - final_sl_pips * self.config.pip_value if final_sl_pips else None
+                
                 trade = Trade(
                     entry_time=current_time,
                     direction="LONG",
                     entry_price=entry_price,
-                    units=self.config.units,
+                    units=units,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
                 )
                 self.open_positions.append(trade)
 
@@ -185,11 +209,16 @@ class Backtester:
             # ショートエントリー
             if len(self.open_positions) < self.config.max_positions:
                 entry_price = current_price - spread_cost / 2
+                tp_price = entry_price - final_tp_pips * self.config.pip_value if final_tp_pips else None
+                sl_price = entry_price + final_sl_pips * self.config.pip_value if final_sl_pips else None
+
                 trade = Trade(
                     entry_time=current_time,
                     direction="SHORT",
                     entry_price=entry_price,
-                    units=self.config.units,
+                    units=units,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
                 )
                 self.open_positions.append(trade)
 
@@ -219,45 +248,30 @@ class Backtester:
         balance: float,
     ) -> float:
         """オープンポジションの利確・損切を判定する。"""
-        tp_pips = self.config.take_profit_pips
-        sl_pips = self.config.stop_loss_pips
-        pip_val = self.config.pip_value
-
-        if tp_pips is None and sl_pips is None:
-            return balance
-
         closed = []
         for pos in self.open_positions:
             if pos.direction == "LONG":
-                pips_change_high = (high - pos.entry_price) / pip_val
-                pips_change_low = (low - pos.entry_price) / pip_val
                 # 損切チェック（損切が先に発動する想定）
-                if sl_pips is not None and pips_change_low <= -sl_pips:
-                    exit_price = pos.entry_price - sl_pips * pip_val
+                if pos.sl_price is not None and low <= pos.sl_price:
                     balance = self._close_trade(
-                        pos, current_time, exit_price, balance, "stop_loss",
+                        pos, current_time, pos.sl_price, balance, "stop_loss",
                     )
                     closed.append(pos)
                 # 利確チェック
-                elif tp_pips is not None and pips_change_high >= tp_pips:
-                    exit_price = pos.entry_price + tp_pips * pip_val
+                elif pos.tp_price is not None and high >= pos.tp_price:
                     balance = self._close_trade(
-                        pos, current_time, exit_price, balance, "take_profit",
+                        pos, current_time, pos.tp_price, balance, "take_profit",
                     )
                     closed.append(pos)
             else:  # SHORT
-                pips_change_low = (pos.entry_price - low) / pip_val
-                pips_change_high = (pos.entry_price - high) / pip_val
-                if sl_pips is not None and pips_change_high <= -sl_pips:
-                    exit_price = pos.entry_price + sl_pips * pip_val
+                if pos.sl_price is not None and high >= pos.sl_price:
                     balance = self._close_trade(
-                        pos, current_time, exit_price, balance, "stop_loss",
+                        pos, current_time, pos.sl_price, balance, "stop_loss",
                     )
                     closed.append(pos)
-                elif tp_pips is not None and pips_change_low >= tp_pips:
-                    exit_price = pos.entry_price - tp_pips * pip_val
+                elif pos.tp_price is not None and low <= pos.tp_price:
                     balance = self._close_trade(
-                        pos, current_time, exit_price, balance, "take_profit",
+                        pos, current_time, pos.tp_price, balance, "take_profit",
                     )
                     closed.append(pos)
 
